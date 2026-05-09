@@ -1,0 +1,23 @@
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj
+.DS_Store
+.idea/
+.claude/
+.env
+./postprocess/.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local recordings and post-process artifacts
+*.wav
+*.transcript.md
+*.notes.md
+*.meetingrec-state.json
+
+# Editor / OS
+.vscode/
+*.swp
