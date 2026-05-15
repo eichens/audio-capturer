@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 
 @dataclass
@@ -29,9 +29,10 @@ class RunState:
     max_remote_speakers: Optional[int]
     keep_s3_objects: bool
     run_id: str
-    mic_s3_key: str
+    # mic_* are None in speaker-only (mono) runs — only the system track exists.
+    mic_s3_key: Optional[str]
     system_s3_key: str
-    mic_job_name: str
+    mic_job_name: Optional[str]
     system_job_name: str
 
 

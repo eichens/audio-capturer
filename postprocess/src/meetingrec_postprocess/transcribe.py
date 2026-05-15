@@ -1,9 +1,12 @@
 """ASR + diarization for meetingrec WAVs using Amazon Transcribe.
 
-Input: a stereo WAV with mic on left (you) and system audio on right (remote
-participants, possibly multiple speakers).
+Input: a WAV produced by meetingrec, in one of two layouts:
+  - **stereo** (default mode): mic on left (you), system audio on right
+    (remote participants, possibly multiple speakers).
+  - **mono** (--speaker-only mode): system audio only — only the remote side
+    of the call was captured.
 
-Strategy:
+Stereo strategy:
   1. Split the stereo WAV into two mono WAVs with ffmpeg.
   2. Upload both mono WAVs to a user-provided S3 bucket.
   3. Start two Transcribe jobs in parallel:
@@ -12,6 +15,10 @@ Strategy:
   4. Poll both jobs until they finish; download JSON output.
   5. Merge both transcripts chronologically.
   6. Clean up S3 objects and the state file.
+
+Mono strategy: just one upload and one diarized Transcribe job — there is no
+mic track to separate from. Saves ~$0.024/min of Transcribe spend over the
+stereo path.
 
 The work is split into `launch_jobs` and `finish_jobs` so that if the process
 dies between them (e.g. expired creds while polling), a subsequent rerun can
@@ -26,6 +33,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+import wave
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +54,13 @@ class Segment:
 
 
 # ---------- ffmpeg / S3 / Transcribe primitives ----------
+
+def _wav_channel_count(wav_path: Path) -> int:
+    """Read the channel count from a WAV header. Used to dispatch between the
+    stereo (mic+system) and mono (speaker-only) post-processing paths."""
+    with wave.open(str(wav_path), "rb") as w:
+        return w.getnchannels()
+
 
 def _run_ffmpeg_split(wav_path: Path, left_out: Path, right_out: Path) -> None:
     cmd = [
@@ -206,7 +221,11 @@ def launch_jobs(
     s3_prefix: str = "meetingrec/",
     keep_s3_objects: bool = False,
 ) -> RunState:
-    """Split channels, upload to S3, start both Transcribe jobs, persist state.
+    """Upload to S3, start the appropriate Transcribe jobs, persist state.
+
+    Auto-detects stereo vs. mono input:
+      - stereo: split channels, run mic + system jobs (see module docstring).
+      - mono: upload as-is, run a single diarized job — speaker-only mode.
 
     Returns a RunState that finish_jobs() can consume. Also writes the same
     state to `<wav>.meetingrec-state.json` so a rerun after a crash can pick up.
@@ -217,29 +236,39 @@ def launch_jobs(
     transcribe = session.client("transcribe")
 
     run_id = uuid.uuid4().hex[:12]
-    mic_key = f"{s3_prefix}{run_id}/mic.wav"
     sys_key = f"{s3_prefix}{run_id}/system.wav"
-    mic_job = f"meetingrec-{run_id}-mic"
     sys_job = f"meetingrec-{run_id}-sys"
 
+    is_stereo = _wav_channel_count(wav_path) >= 2
+    mic_key: Optional[str] = f"{s3_prefix}{run_id}/mic.wav" if is_stereo else None
+    mic_job: Optional[str] = f"meetingrec-{run_id}-mic" if is_stereo else None
+
     try:
-        with tempfile.TemporaryDirectory(prefix="meetingrec-pp-") as tmp_str:
-            tmp = Path(tmp_str)
-            mic_wav = tmp / "mic.wav"
-            sys_wav = tmp / "system.wav"
-            _run_ffmpeg_split(wav_path, mic_wav, sys_wav)
+        if is_stereo:
+            with tempfile.TemporaryDirectory(prefix="meetingrec-pp-") as tmp_str:
+                tmp = Path(tmp_str)
+                mic_wav = tmp / "mic.wav"
+                sys_wav = tmp / "system.wav"
+                _run_ffmpeg_split(wav_path, mic_wav, sys_wav)
 
-            mic_uri = _upload_to_s3(s3, s3_bucket, mic_key, mic_wav)
-            sys_uri = _upload_to_s3(s3, s3_bucket, sys_key, sys_wav)
+                mic_uri = _upload_to_s3(s3, s3_bucket, mic_key, mic_wav)
+                sys_uri = _upload_to_s3(s3, s3_bucket, sys_key, sys_wav)
 
-        _start_transcription_job(
-            transcribe, mic_job, mic_uri, language_code,
-            show_speaker_labels=False, max_speaker_labels=None,
-        )
-        _start_transcription_job(
-            transcribe, sys_job, sys_uri, language_code,
-            show_speaker_labels=True, max_speaker_labels=max_remote_speakers,
-        )
+            _start_transcription_job(
+                transcribe, mic_job, mic_uri, language_code,
+                show_speaker_labels=False, max_speaker_labels=None,
+            )
+            _start_transcription_job(
+                transcribe, sys_job, sys_uri, language_code,
+                show_speaker_labels=True, max_speaker_labels=max_remote_speakers,
+            )
+        else:
+            # Mono: skip ffmpeg entirely, upload the WAV directly.
+            sys_uri = _upload_to_s3(s3, s3_bucket, sys_key, wav_path)
+            _start_transcription_job(
+                transcribe, sys_job, sys_uri, language_code,
+                show_speaker_labels=True, max_speaker_labels=max_remote_speakers,
+            )
     except BaseException as exc:  # noqa: BLE001
         reason = classify_boto_error(exc)
         if reason is not None:
@@ -262,13 +291,19 @@ def launch_jobs(
         system_job_name=sys_job,
     )
     save_state(state, state_path_for(wav_path))
-    log.info("Launched jobs %s and %s; state persisted.", mic_job, sys_job)
+    if is_stereo:
+        log.info("Launched stereo jobs %s and %s; state persisted.", mic_job, sys_job)
+    else:
+        log.info("Launched speaker-only job %s; state persisted.", sys_job)
     return state
 
 
 def finish_jobs(state: RunState) -> list[Segment]:
     """Poll the jobs identified by `state` to completion, download transcripts,
     merge into time-ordered segments, and clean up (S3 objects + jobs + state file).
+
+    Handles both stereo (mic+system) and mono (speaker-only) runs based on
+    whether `state.mic_job_name` is set.
 
     Raises AuthError on credential issues; in that case the state file is
     preserved so the user can rerun after re-auth.
@@ -278,23 +313,26 @@ def finish_jobs(state: RunState) -> list[Segment]:
     s3 = session.client("s3")
     transcribe = session.client("transcribe")
 
-    try:
-        # Poll both concurrently so total wait = max(mic, sys), not sum.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            mic_future = pool.submit(_wait_for_job, transcribe, state.mic_job_name)
-            sys_future = pool.submit(_wait_for_job, transcribe, state.system_job_name)
-            mic_job = mic_future.result()
-            sys_job = sys_future.result()
+    has_mic = state.mic_job_name is not None
 
-        mic_json = _download_transcript(mic_job)
-        sys_json = _download_transcript(sys_job)
+    try:
+        if has_mic:
+            # Poll both concurrently so total wait = max(mic, sys), not sum.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                mic_future = pool.submit(_wait_for_job, transcribe, state.mic_job_name)
+                sys_future = pool.submit(_wait_for_job, transcribe, state.system_job_name)
+                mic_job = mic_future.result()
+                sys_job = sys_future.result()
+
+            mic_json = _download_transcript(mic_job)
+            sys_json = _download_transcript(sys_job)
+        else:
+            sys_job = _wait_for_job(transcribe, state.system_job_name)
+            sys_json = _download_transcript(sys_job)
+            mic_json = None
     except AuthError:
         # Don't clean up — preserve state so the user can rerun after re-auth.
         raise
-
-    mic_segments = _items_to_segments(mic_json, default_speaker="You")
-    # Mic side is single-speaker; override any label Transcribe might emit.
-    mic_segments = [Segment(s.start, s.end, "You", s.text) for s in mic_segments]
 
     sys_segments_raw = _items_to_segments(sys_json, default_speaker="Speaker")
 
@@ -311,18 +349,26 @@ def finish_jobs(state: RunState) -> list[Segment]:
         for s in sys_segments_raw
     ]
 
-    all_segments = mic_segments + sys_segments
+    if has_mic and mic_json is not None:
+        mic_segments = _items_to_segments(mic_json, default_speaker="You")
+        # Mic side is single-speaker; override any label Transcribe might emit.
+        mic_segments = [Segment(s.start, s.end, "You", s.text) for s in mic_segments]
+        all_segments = mic_segments + sys_segments
+    else:
+        all_segments = sys_segments
     all_segments.sort(key=lambda s: s.start)
 
     # Successful completion: clean up.
-    for job_name in (state.mic_job_name, state.system_job_name):
+    job_names = [state.system_job_name] + ([state.mic_job_name] if has_mic else [])
+    for job_name in job_names:
         try:
             transcribe.delete_transcription_job(TranscriptionJobName=job_name)
         except Exception as e:  # noqa: BLE001
             log.debug("delete_transcription_job(%s) failed: %s", job_name, e)
     if not state.keep_s3_objects:
-        _delete_from_s3(s3, state.s3_bucket, state.mic_s3_key)
         _delete_from_s3(s3, state.s3_bucket, state.system_s3_key)
+        if state.mic_s3_key is not None:
+            _delete_from_s3(s3, state.s3_bucket, state.mic_s3_key)
 
     delete_state(state_path_for(Path(state.wav_path)))
     return all_segments

@@ -147,10 +147,11 @@ def main(argv: list[str] | None = None) -> int:
             _print_auth_failure(e)
             return 3
     else:
+        mode = "stereo (mic+system)" if state.mic_job_name else "speaker-only (mono)"
         print(
-            f"Resuming from existing state ({state_path.name}):\n"
+            f"Resuming from existing state ({state_path.name}, {mode}):\n"
             f"  run_id={state.run_id}\n"
-            f"  mic_job={state.mic_job_name}\n"
+            f"  mic_job={state.mic_job_name or '(none)'}\n"
             f"  sys_job={state.system_job_name}"
         )
 

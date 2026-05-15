@@ -146,8 +146,22 @@ First read per terminal/GUI session prompts macOS to allow access; click
 meetingrec                              # writes ~/Recordings/meeting-<timestamp>.wav + transcript + notes
 meetingrec ~/Desktop/client-call.wav    # explicit path
 meetingrec -n                           # record only, skip transcription/summary
+meetingrec -s                           # speaker-only: capture system audio only (mono WAV)
 meetingrec --help
 ```
+
+### Speaker-only mode
+
+`-s` / `--speaker-only` records just the other side of the call. The mic is
+not captured (and macOS won't prompt for microphone permission), and the
+output is a mono 16kHz WAV instead of the default stereo. The post-processor
+auto-detects the mono layout and runs a single diarized Transcribe job —
+everyone in the recording is labeled `Speaker A`, `Speaker B`, … in order of
+first appearance. There is no `You` channel in this mode.
+
+Use this when you only need a record of what was said *to* you (e.g., a
+talk you're attending, a webinar) and don't want your own audio in the
+transcript.
 
 Press `Ctrl-C` to stop recording. `meetingrec` finalizes the WAV, prints the
 duration, and invokes `meetingrec-postprocess`. Total wall-clock for a
@@ -216,6 +230,7 @@ audio-capturer/
 │   ├── MicCapture.swift                # AVAudioEngine tap + route-change handling
 │   ├── SystemAudioCapture.swift        # SCStream with auto-restart
 │   ├── StereoMixer.swift               # merges ring buffers → int16 stereo
+│   ├── MonoSink.swift                  # speaker-only path: ring buffer → int16 mono
 │   ├── WAVWriter.swift                 # streaming WAV with header fixup on close
 │   ├── FloatRingBuffer.swift
 │   ├── AudioFormat.swift               # AVAudioConverter wrapper

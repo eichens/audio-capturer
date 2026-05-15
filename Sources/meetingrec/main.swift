@@ -4,6 +4,7 @@ import Darwin
 struct CLIArgs {
     var outputPath: String?
     var noPostprocess: Bool = false
+    var speakerOnly: Bool = false
     var showHelp: Bool = false
 }
 
@@ -17,6 +18,8 @@ func parseArgs(_ argv: [String]) -> (CLIArgs, String?) {
             out.showHelp = true
         case "--no-postprocess", "-n":
             out.noPostprocess = true
+        case "--speaker-only", "-s":
+            out.speakerOnly = true
         case _ where a.hasPrefix("-"):
             return (out, "unknown flag: \(a)")
         default:
@@ -37,6 +40,9 @@ Records system audio + microphone to a stereo WAV (mic=L, system=R), then runs
 the post-processor (diarized transcript + meeting notes) when you Ctrl-C.
 
 Options:
+  -s, --speaker-only     Only capture the other side of the call (system audio).
+                         Writes a mono WAV; the post-processor diarizes everyone
+                         as Speaker A/B/… and skips microphone permission.
   -n, --no-postprocess   Skip the post-processor; just save the WAV.
   -h, --help             Show this help and exit.
 
@@ -87,18 +93,25 @@ func run() async -> Int32 {
     }
 
     // MARK: permissions
+    // Screen recording is required for both modes (system audio rides on the
+    // SCStream entitlement). Microphone access is only needed when we actually
+    // capture the mic — speaker-only mode skips it entirely so the user isn't
+    // prompted for a permission they won't use.
     guard await Permissions.ensureScreenRecording() else { return 2 }
-    guard await Permissions.ensureMicrophone() else { return 2 }
+    if !cli.speakerOnly {
+        guard await Permissions.ensureMicrophone() else { return 2 }
+    }
 
     // MARK: wiring
     // 5 seconds of headroom per source @ 16kHz = 80_000 samples. Plenty to absorb
     // bursts without growing memory unbounded.
-    let micBuffer = FloatRingBuffer(capacity: 80_000)
+    let micBuffer = cli.speakerOnly ? nil : FloatRingBuffer(capacity: 80_000)
     let systemBuffer = FloatRingBuffer(capacity: 80_000)
 
+    let outputChannels: UInt16 = cli.speakerOnly ? 1 : 2
     let writer: WAVWriter
     do {
-        writer = try WAVWriter(url: outputURL, sampleRate: 16_000, channels: 2)
+        writer = try WAVWriter(url: outputURL, sampleRate: 16_000, channels: outputChannels)
     } catch {
         FileHandle.standardError.write(Data("meetingrec: could not open output file \(outputURL.path): \(error.localizedDescription)\n".utf8))
         return 1
@@ -109,35 +122,51 @@ func run() async -> Int32 {
         FileHandle.standardError.write(Data("meetingrec: runtime warning: \(err.localizedDescription)\n".utf8))
     }
 
-    let mic = MicCapture(ringBuffer: micBuffer, errorHandler: runtimeErrorHandler)
+    let mic: MicCapture? = micBuffer.map { MicCapture(ringBuffer: $0, errorHandler: runtimeErrorHandler) }
     let system = SystemAudioCapture(ringBuffer: systemBuffer, errorHandler: runtimeErrorHandler)
-    let mixer = StereoMixer(
-        micBuffer: micBuffer,
-        systemBuffer: systemBuffer,
-        writer: writer,
-        errorHandler: runtimeErrorHandler
-    )
+    let mixer: StereoMixer?
+    let monoSink: MonoSink?
+    if let micBuffer = micBuffer {
+        mixer = StereoMixer(
+            micBuffer: micBuffer,
+            systemBuffer: systemBuffer,
+            writer: writer,
+            errorHandler: runtimeErrorHandler
+        )
+        monoSink = nil
+    } else {
+        mixer = nil
+        monoSink = MonoSink(
+            buffer: systemBuffer,
+            writer: writer,
+            errorHandler: runtimeErrorHandler
+        )
+    }
 
     // MARK: start
-    do {
-        try mic.start()
-    } catch {
-        FileHandle.standardError.write(Data("meetingrec: failed to start microphone: \(error.localizedDescription)\n".utf8))
-        try? writer.close()
-        return 1
+    if let mic = mic {
+        do {
+            try mic.start()
+        } catch {
+            FileHandle.standardError.write(Data("meetingrec: failed to start microphone: \(error.localizedDescription)\n".utf8))
+            try? writer.close()
+            return 1
+        }
     }
     do {
         try await system.start()
     } catch {
         FileHandle.standardError.write(Data("meetingrec: failed to start system audio capture: \(error.localizedDescription)\n".utf8))
-        mic.stop()
+        mic?.stop()
         try? writer.close()
         return 1
     }
-    mixer.start()
+    mixer?.start()
+    monoSink?.start()
 
     let startDate = Date()
-    print("Recording started. Press Ctrl-C to stop.")
+    let modeDescription = cli.speakerOnly ? "speaker-only (mono)" : "mic + system (stereo)"
+    print("Recording started [\(modeDescription)]. Press Ctrl-C to stop.")
     print("Output: \(outputURL.path)")
 
     // MARK: SIGINT
@@ -160,9 +189,10 @@ func run() async -> Int32 {
 
     // MARK: shutdown
     print("\nStopping…")
-    mic.stop()
+    mic?.stop()
     await system.stop()
-    mixer.stopAndFlush()
+    mixer?.stopAndFlush()
+    monoSink?.stopAndFlush()
 
     do {
         try writer.close()
