@@ -5,8 +5,8 @@ description = "Transcribe meetingrec WAV recordings with Amazon Transcribe and s
 requires-python = ">=3.10,<3.14"
 dependencies = [
     # 1.40+ is needed for AWS_BEARER_TOKEN_BEDROCK support (Bedrock API keys).
-    "boto3>=1.40",
-    "strands-agents>=0.1",
+    "boto3>=1.43",
+    "strands-agents>=1.41",
 ]
 
 [project.scripts]
