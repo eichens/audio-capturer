@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.meetingrec.zoom-watcher</string>
+
+    <!-- __HOME__ placeholders are rewritten by hooks/install-zoom-watcher.sh -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__HOME__/.local/libexec/meetingrec/zoom-watcher.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart the watcher if it ever crashes; ThrottleInterval avoids a
+         tight respawn loop if it exits immediately (e.g. bad config). -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/meetingrec/zoom-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/meetingrec/zoom-watcher.log</string>
+
+    <!-- Recording env (S3 bucket, region, etc.) lives in
+         ~/.config/meetingrec/zoom-watcher.env, sourced by the script itself,
+         so you can edit it without reloading the agent. -->
+</dict>
+</plist>

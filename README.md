@@ -187,6 +187,41 @@ It detects the state file, skips the upload/launch, and reconnects to the
 already-running Transcribe jobs. The state file is deleted on successful
 completion.
 
+### Automatic recording of Zoom meetings
+
+`hooks/` contains a launchd agent that starts `meetingrec` when you join a
+Zoom meeting and stops it (equivalent to Ctrl-C, so the WAV is finalized and
+the post-processor runs) when the meeting ends:
+
+```sh
+./hooks/install-zoom-watcher.sh              # install + start
+./hooks/install-zoom-watcher.sh --uninstall
+```
+
+How it works: `zoom-watcher.sh` polls every 5 seconds for Zoom's `CptHost`
+helper process, which Zoom runs for exactly the duration of each meeting
+(the main `zoom.us` process alone just means the app is open). When the
+helper appears a recording starts; when it has been gone for 3 consecutive
+polls (~15 s of grace, so a momentary blip doesn't split the recording) the
+recording is stopped. Back-to-back meetings each get their own WAV.
+
+Configuration lives in `~/.config/meetingrec/zoom-watcher.env` (created from
+`hooks/zoom-watcher.env.example` on first install). launchd agents don't read
+your shell profile, so `MEETINGREC_S3_BUCKET` / `AWS_REGION` must be set
+there. You can also set `MEETINGREC_ZOOM_ARGS="-s"` for speaker-only
+auto-recordings, or `-n` to skip post-processing.
+
+Caveats:
+
+- `meetingrec` must already hold Screen Recording (and Microphone)
+  permission — run it once manually first. If it can't start, the watcher
+  retries twice, then logs and waits for the next meeting.
+- If your AWS session has expired when a meeting ends, the recording is
+  still saved; transcription fails and leaves a state file, and you resume
+  it manually after `aws sso login` (see below).
+- Logs: `~/Library/Logs/meetingrec/zoom-watcher.log` for the watcher, plus a
+  per-recording `recording-<timestamp>.log` with meetingrec's own output.
+
 ### Standalone post-processing
 
 Any WAV with mic-on-L, system-on-R layout works — not just meetingrec's
@@ -236,6 +271,11 @@ audio-capturer/
 │   ├── AudioFormat.swift               # AVAudioConverter wrapper
 │   ├── Permissions.swift               # TCC probes
 │   └── Info.plist                      # embedded via linker for mic usage
+├── hooks/                              # Zoom auto-record launchd agent
+│   ├── zoom-watcher.sh                 # polls for Zoom's CptHost, start/stop meetingrec
+│   ├── com.meetingrec.zoom-watcher.plist
+│   ├── zoom-watcher.env.example        # config template (installed to ~/.config)
+│   └── install-zoom-watcher.sh         # install/--uninstall
 └── postprocess/                        # Python companion tool
     ├── pyproject.toml
     └── src/meetingrec_postprocess/
