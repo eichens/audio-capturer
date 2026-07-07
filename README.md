@@ -219,8 +219,76 @@ Caveats:
 - If your AWS session has expired when a meeting ends, the recording is
   still saved; transcription fails and leaves a state file, and you resume
   it manually after `aws sso login` (see below).
-- Logs: `~/Library/Logs/meetingrec/zoom-watcher.log` for the watcher, plus a
-  per-recording `recording-<timestamp>.log` with meetingrec's own output.
+- The config file is sourced once at watcher startup. After editing it,
+  restart the watcher to pick up the change:
+  `launchctl kickstart -k gui/$(id -u)/com.meetingrec.zoom-watcher`
+
+#### Knowing it's working
+
+There are three layers of evidence, in order of immediacy.
+
+**1. The watcher log** — every decision the watcher makes, timestamped:
+
+```sh
+tail -f ~/Library/Logs/meetingrec/zoom-watcher.log
+```
+
+Within ~5 seconds of joining a meeting (one poll interval):
+
+```
+2026-07-07 10:02:15 meeting detected -> started meetingrec (pid 48123, log …/recording-2026-07-07-100215.log)
+```
+
+Within ~15 seconds of the call ending (the 3-poll grace period):
+
+```
+2026-07-07 10:47:31 meeting ended -> sending SIGINT to meetingrec (pid 48123)
+```
+
+Reading it: **no line after joining a call** means the watcher isn't
+detecting the meeting (check `pgrep -x CptHost` mid-call — it should print a
+pid). **`meetingrec exited 3 times this meeting; giving up…`** means
+detection worked but `meetingrec` itself is failing to start — almost always
+the Screen Recording permission (System Settings → Privacy & Security →
+Screen & System Audio Recording; the binary must be granted directly, since
+launchd, not your terminal, is the parent process).
+
+**2. The per-recording log** — `meetingrec`'s own output, one file per
+recording at the path printed in the watcher log line. It reads exactly like
+a manual terminal run: `Recording started…` / `Output: …` at the start, and
+after the meeting ends, `Stopping…`, `Saved: …`, `Duration: …`, followed by
+the full post-processor output. Transcription/AWS errors (e.g. expired SSO
+session) appear here, not in the watcher log.
+
+**3. The artifacts** — the WAV appears in `~/Recordings/` immediately when
+the recording starts and grows as audio arrives (~230 MB/hour), so a growing
+file mid-call is direct proof capture is running:
+
+```sh
+ls -lh ~/Recordings/
+```
+
+The `.transcript.md` and `.notes.md` land next to it when post-processing
+finishes (8–15 minutes for an hour of audio). You can also check the process
+directly mid-call: `pgrep -fl meetingrec`.
+
+#### Verifying after install (no real meeting needed)
+
+1. Watcher is alive:
+
+   ```sh
+   launchctl print gui/$(id -u)/com.meetingrec.zoom-watcher | grep state   # state = running
+   ```
+
+   and the watcher log should end with
+   `zoom-watcher started (poll 5s, end grace 15s)`.
+
+2. Dry run: start a Zoom meeting alone (New Meeting — CptHost spawns even
+   with no participants), watch the `meeting detected` line appear, talk for
+   30 seconds, leave, and confirm the `meeting ended` line, then the saved
+   WAV. To make the dry run cheap, temporarily set
+   `MEETINGREC_ZOOM_ARGS="-n"` in the config (and restart the watcher, see
+   above) so it skips the AWS transcription step.
 
 ### Standalone post-processing
 
