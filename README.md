@@ -173,6 +173,32 @@ Outputs land next to the WAV:
 - `meeting-<timestamp>.transcript.md` — diarized transcript
 - `meeting-<timestamp>.notes.md` — Opus-summarized meeting notes
 
+### Obsidian export
+
+If `MEETINGREC_OBSIDIAN_VAULT` is set (or `--obsidian-vault` is passed to the
+post-processor), the meeting notes are *additionally* copied into that vault
+directory — the copy next to the WAV always remains. The vault copy differs
+from the plain one in two ways:
+
+- **Filename/title:** Opus generates a short descriptive title from the
+  transcript (e.g. `Q3 Launch Timeline Review.md`) instead of the timestamp
+  name. Name collisions get a numeric suffix rather than overwriting.
+- **Frontmatter:** the note starts with Obsidian YAML frontmatter carrying
+  the recording date and a `meeting-notes` tag:
+
+  ```markdown
+  ---
+  title: Q3 Launch Timeline Review
+  date: 2026-07-07 07:56
+  tags:
+    - meeting-notes
+  ---
+  ```
+
+The export is best-effort: if the vault directory is missing or unwritable,
+a warning is printed and the run still succeeds (the Recordings copy is the
+source of truth).
+
 ### Resuming a post-process after expired credentials
 
 If `meetingrec-postprocess` hit an auth failure mid-run, it leaves behind
@@ -209,7 +235,8 @@ Configuration lives in `~/.config/meetingrec/zoom-watcher.env` (created from
 `hooks/zoom-watcher.env.example` on first install). launchd agents don't read
 your shell profile, so `MEETINGREC_S3_BUCKET` / `AWS_REGION` must be set
 there. You can also set `MEETINGREC_ZOOM_ARGS="-s"` for speaker-only
-auto-recordings, or `-n` to skip post-processing.
+auto-recordings, or `-n` to skip post-processing. `MEETINGREC_OBSIDIAN_VAULT`
+in the same file enables the Obsidian export (see above) for auto-recordings.
 
 Caveats:
 
@@ -311,6 +338,7 @@ meetingrec-postprocess --no-resume /path/to/recording.wav       # ignore stale s
 | `MEETINGREC_S3_PREFIX` | no | Object-key prefix (default `meetingrec/`) |
 | `TRANSCRIBE_LANGUAGE` | no | Transcribe language code (default `en-US`) |
 | `BEDROCK_MODEL_ID` | no | Override the Opus model ID (default `global.anthropic.claude-opus-4-7`) |
+| `MEETINGREC_OBSIDIAN_VAULT` | no | Obsidian vault directory to copy meeting notes into (titled, tagged `meeting-notes`) |
 | `MEETINGREC_POSTPROCESS` | no | Absolute path to `meetingrec-postprocess` binary; overrides `$PATH` lookup |
 
 Plus whatever your AWS credential chain needs — `AWS_PROFILE`, SSO session,
@@ -350,6 +378,7 @@ audio-capturer/
         ├── __main__.py                 # CLI entrypoint
         ├── transcribe.py               # ffmpeg split + Transcribe + merge
         ├── summarize.py                # Strands agent + Bedrock + Keychain auth
+        ├── obsidian.py                 # titled + tagged copy into an Obsidian vault
         ├── keychain.py                 # security(1) wrapper
         ├── auth.py                     # STS preflight + AuthError classification
         └── state.py                    # resume state file

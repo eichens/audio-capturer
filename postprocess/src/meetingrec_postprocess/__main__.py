@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from .auth import AuthError, preflight, reauth_instructions
+from .obsidian import export_note, recording_datetime, split_title
 from .state import load as load_state, state_path_for
 from .summarize import DEFAULT_MODEL_ID, summarize_to_markdown
 from .transcribe import finish_jobs, launch_jobs, segments_to_markdown
@@ -66,6 +67,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--bedrock-model-id",
         default=os.environ.get("BEDROCK_MODEL_ID", DEFAULT_MODEL_ID),
         help=f"Bedrock model ID for summarization (default: {DEFAULT_MODEL_ID}).",
+    )
+    p.add_argument(
+        "--obsidian-vault",
+        type=Path,
+        default=os.environ.get("MEETINGREC_OBSIDIAN_VAULT") or None,
+        help="Obsidian vault directory to copy the meeting notes into (with a "
+        "meeting-notes frontmatter tag and a model-generated title). "
+        "Set $MEETINGREC_OBSIDIAN_VAULT to avoid passing every run.",
     )
     p.add_argument(
         "--skip-summary",
@@ -197,8 +206,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    notes_path.write_text(notes_md, encoding="utf-8")
+    title, notes_body = split_title(notes_md)
+    notes_path.write_text(notes_body, encoding="utf-8")
     print(f"Wrote meeting notes: {notes_path}")
+
+    # MARK: Obsidian export (best-effort — the Recordings copy above is the
+    # source of truth, so a vault problem must not fail the run)
+    if args.obsidian_vault:
+        try:
+            vault_note = export_note(
+                notes_body,
+                title=title or wav.stem,
+                vault_dir=args.obsidian_vault,
+                recorded_at=recording_datetime(wav),
+            )
+            print(f"Copied notes to Obsidian: {vault_note}")
+        except OSError as e:
+            print(
+                f"meetingrec-postprocess: Obsidian export failed: {e}\n"
+                f"Notes are still available at {notes_path}.",
+                file=sys.stderr,
+            )
+
     return 0
 
 

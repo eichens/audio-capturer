@@ -29,8 +29,16 @@ diarized transcript of a meeting. The participant labeled "You" is the person wh
 recorded the meeting; other speakers ("Speaker A", "Speaker B", …) are the remote
 participants and their identities are not known.
 
-Produce clean, concise meeting notes as a Markdown document with these sections
-(omit any section that has no content — don't invent):
+Produce clean, concise meeting notes as a Markdown document.
+
+The very first line of your reply must be:
+
+TITLE: <a specific 4-10 word title describing what this meeting was about>
+
+Base the title on the actual content (e.g. "Q3 Launch Timeline Review with Vendor",
+not "Meeting Notes" or "Zoom Call"). Do not use Markdown formatting, quotes, or
+the characters / \\ : in the title. After that line, output the notes with these
+sections (omit any section that has no content — don't invent):
 
 # Meeting notes
 
